@@ -3,6 +3,11 @@
 
 #pragma once
 
+#include <string>
+#include <string_view>
+#include <utility>
+#include <vector>
+
 #include "../ExpressionCommandInterface.h"
 
 // Callback interface to be implemented by the clients of CCalcEngine if they require equation history
