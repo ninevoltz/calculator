@@ -13,7 +13,17 @@ namespace Calculator.Avalonia.ViewModels;
 public partial class MainWindowViewModel : ViewModelBase
 {
     private readonly CalculatorEngine _engine = new();
+    private readonly NativeCalculatorEngine _nativeEngine = new();
     private readonly ProgrammerEngine _programmerEngine = new();
+    private const int MaximumHistoryItems = 50;
+
+    public MainWindowViewModel()
+    {
+        AddGraphFunction("x*sin(x)");
+        AddGraphFunction();
+        ActiveGraphFunction = GraphFunctions.First();
+        PlotGraph();
+    }
 
     [ObservableProperty]
     private string _display = "0";
@@ -52,12 +62,6 @@ public partial class MainWindowViewModel : ViewModelBase
     private string _programmerBin = "0";
 
     [ObservableProperty]
-    private string _graphExpression = "x*sin(x)";
-
-    [ObservableProperty]
-    private string _graphExpression2 = string.Empty;
-
-    [ObservableProperty]
     private string _plottedExpressions = "x*sin(x)";
 
     [ObservableProperty]
@@ -67,13 +71,10 @@ public partial class MainWindowViewModel : ViewModelBase
     private double _graphParameter = 2.7;
 
     [ObservableProperty]
-    private string _activeGraphInput = "Primary";
+    private ObservableCollection<GraphFunction> _graphFunctions = new();
 
     [ObservableProperty]
-    private bool _isPrimaryGraphInput = true;
-
-    [ObservableProperty]
-    private bool _isSecondaryGraphInput;
+    private GraphFunction? _activeGraphFunction;
 
     [ObservableProperty]
     private ObservableCollection<GraphVariable> _graphVariables = new();
@@ -102,18 +103,34 @@ public partial class MainWindowViewModel : ViewModelBase
     [ObservableProperty]
     private double _graphLineThickness = 2.4;
 
+    public ObservableCollection<CalculationHistoryItem> HistoryItems { get; } = new();
+
+    public bool HasHistory => HistoryItems.Count > 0;
+
     [RelayCommand]
     private void Press(string key)
     {
         if (IsProgrammer)
         {
-            ApplyProgrammerState(_programmerEngine.Press(key));
+            var programmerState = _programmerEngine.Press(key);
+            ApplyProgrammerState(programmerState);
+            AddHistoryIfCompleted(key, programmerState.Expression, programmerState.Display);
             return;
         }
 
-        var state = _engine.Press(key);
+        CalculatorState state;
+        if (_nativeEngine.IsAvailable && _nativeEngine.TryPress(key, out var nativeState))
+        {
+            state = nativeState;
+        }
+        else
+        {
+            state = _engine.Press(key);
+        }
+
         Display = state.Display;
         Expression = state.Expression;
+        AddHistoryIfCompleted(key, state.Expression, state.Display);
     }
 
     [RelayCommand]
@@ -138,7 +155,9 @@ public partial class MainWindowViewModel : ViewModelBase
         }
         else
         {
-            var state = _engine.Reset();
+            var useScientific = mode == "Scientific";
+            _nativeEngine.SetScientificMode(useScientific);
+            var state = _nativeEngine.IsAvailable ? _nativeEngine.Reset() : _engine.Reset();
             Display = state.Display;
             Expression = state.Expression;
         }
@@ -148,17 +167,26 @@ public partial class MainWindowViewModel : ViewModelBase
     private void PlotGraph()
     {
         SyncGraphVariables();
-        PlottedExpressions = string.IsNullOrWhiteSpace(GraphExpression2)
-            ? GraphExpression
-            : GraphExpression + "\n" + GraphExpression2;
-        Display = "y = " + GraphExpression;
+        PlottedExpressions = string.Join(
+            "\n",
+            GraphFunctions
+                .Select(function => function.Expression)
+                .Where(expression => !string.IsNullOrWhiteSpace(expression)));
+        Display = "y = " + (ActiveGraphFunction?.Expression ?? string.Empty);
         Expression = "Graphing";
     }
 
     [RelayCommand]
     private void GraphKey(string key)
     {
-        var currentExpression = IsSecondaryGraphInput ? GraphExpression2 : GraphExpression;
+        var activeFunction = ActiveGraphFunction ?? GraphFunctions.FirstOrDefault();
+        if (activeFunction is null)
+        {
+            activeFunction = AddGraphFunction();
+            ActiveGraphFunction = activeFunction;
+        }
+
+        var currentExpression = activeFunction.Expression;
         var insertion = key switch
         {
             "Pi" => "pi",
@@ -180,35 +208,32 @@ public partial class MainWindowViewModel : ViewModelBase
             currentExpression += insertion;
         }
 
-        if (IsSecondaryGraphInput)
-        {
-            GraphExpression2 = currentExpression;
-        }
-        else
-        {
-            GraphExpression = currentExpression;
-        }
+        activeFunction.Expression = currentExpression;
 
         PlotGraph();
     }
 
     [RelayCommand]
-    private void SetActiveGraphInput(string input)
+    private void AddGraphExpression()
     {
-        ActiveGraphInput = input;
-        IsPrimaryGraphInput = input == "Primary";
-        IsSecondaryGraphInput = input == "Secondary";
+        ActiveGraphFunction = AddGraphFunction();
     }
 
-    partial void OnGraphExpressionChanged(string value)
+    [RelayCommand]
+    private void RemoveGraphExpression(GraphFunction function)
     {
-        if (IsGraphing)
+        if (GraphFunctions.Count <= 1)
         {
-            PlotGraph();
+            function.Expression = string.Empty;
+            return;
         }
+
+        GraphFunctions.Remove(function);
+        ActiveGraphFunction ??= GraphFunctions.FirstOrDefault();
+        PlotGraph();
     }
 
-    partial void OnGraphExpression2Changed(string value)
+    partial void OnActiveGraphFunctionChanged(GraphFunction? value)
     {
         if (IsGraphing)
         {
@@ -232,8 +257,10 @@ public partial class MainWindowViewModel : ViewModelBase
     [RelayCommand]
     private void ClearGraph()
     {
-        GraphExpression = string.Empty;
-        GraphExpression2 = string.Empty;
+        foreach (var function in GraphFunctions)
+        {
+            function.Expression = string.Empty;
+        }
         GraphVariables.Clear();
         GraphVariablesText = string.Empty;
         PlotGraph();
@@ -304,8 +331,8 @@ public partial class MainWindowViewModel : ViewModelBase
 
     private void SyncGraphVariables()
     {
-        var variableNames = ExtractVariables(GraphExpression)
-            .Concat(ExtractVariables(GraphExpression2))
+        var variableNames = GraphFunctions
+            .SelectMany(function => ExtractVariables(function.Expression))
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .OrderBy(name => name, StringComparer.OrdinalIgnoreCase)
             .ToArray();
@@ -347,6 +374,20 @@ public partial class MainWindowViewModel : ViewModelBase
             .Where(name => name.Length == 1 && !reserved.Contains(name));
     }
 
+    private GraphFunction AddGraphFunction(string expression = "")
+    {
+        var function = new GraphFunction(GraphFunctions.Count + 1, expression);
+        function.PropertyChanged += (_, args) =>
+        {
+            if (args.PropertyName == nameof(GraphFunction.Expression) && IsGraphing)
+            {
+                PlotGraph();
+            }
+        };
+        GraphFunctions.Add(function);
+        return function;
+    }
+
     private void ApplyProgrammerState(ProgrammerState state)
     {
         Display = state.Display;
@@ -355,5 +396,49 @@ public partial class MainWindowViewModel : ViewModelBase
         ProgrammerDec = state.Dec;
         ProgrammerOct = state.Oct;
         ProgrammerBin = state.Bin;
+    }
+
+    [RelayCommand]
+    private void ClearHistory()
+    {
+        HistoryItems.Clear();
+        OnPropertyChanged(nameof(HasHistory));
+    }
+
+    [RelayCommand]
+    private void UseHistoryItem(CalculationHistoryItem item)
+    {
+        Display = item.Result;
+        Expression = item.Expression;
+    }
+
+    private void AddHistoryIfCompleted(string key, string expression, string result)
+    {
+        if (key != "=" || string.IsNullOrWhiteSpace(expression) || !IsHistoryResult(result))
+        {
+            return;
+        }
+
+        var normalizedExpression = expression.Trim();
+        if (!normalizedExpression.EndsWith("=", StringComparison.Ordinal))
+        {
+            normalizedExpression += " =";
+        }
+
+        HistoryItems.Insert(0, new CalculationHistoryItem(normalizedExpression, result, Mode));
+        while (HistoryItems.Count > MaximumHistoryItems)
+        {
+            HistoryItems.RemoveAt(HistoryItems.Count - 1);
+        }
+
+        OnPropertyChanged(nameof(HasHistory));
+    }
+
+    private static bool IsHistoryResult(string result)
+    {
+        return !string.IsNullOrWhiteSpace(result)
+            && !result.Contains("Invalid", StringComparison.OrdinalIgnoreCase)
+            && !result.Contains("Cannot", StringComparison.OrdinalIgnoreCase)
+            && !result.Contains("Error", StringComparison.OrdinalIgnoreCase);
     }
 }

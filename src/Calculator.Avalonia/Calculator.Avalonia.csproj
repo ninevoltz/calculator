@@ -22,4 +22,15 @@
     </PackageReference>
     <PackageReference Include="CommunityToolkit.Mvvm" Version="8.4.1" />
   </ItemGroup>
+
+  <Target Name="BuildNativeCalculator" BeforeTargets="Build" Condition="'$(OS)' == 'Unix'">
+    <Exec WorkingDirectory="$(MSBuildProjectDirectory)/../.." Command="cmake -S . -B build/linux" />
+    <Exec WorkingDirectory="$(MSBuildProjectDirectory)/../.." Command="cmake --build build/linux --target nativecalculator -j2" />
+  </Target>
+
+  <Target Name="CopyNativeCalculator" AfterTargets="Build" Condition="'$(OS)' == 'Unix'">
+    <Copy SourceFiles="$(MSBuildProjectDirectory)/../../build/linux/libnativecalculator.so"
+          DestinationFolder="$(TargetDir)"
+          SkipUnchangedFiles="true" />
+  </Target>
 </Project>
